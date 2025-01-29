@@ -1,159 +1,100 @@
+from llama_index.core.agent import ReActAgent
+from llama_index.llms.openai import OpenAI
+from llama_index.core.llms import ChatMessage
+from llama_index.core.tools import BaseTool, FunctionTool
+from flask import Flask, request, jsonify, render_template_string
+
 import os
-from typing import List, Dict, Optional
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import openai
-from datetime import datetime
+app = Flask(__name__)
 
-# Initialize the FastAPI app
-app = FastAPI()
+# Set OpenAI API key
+os.environ["OPENAI_API_KEY"] = "?"  # Replace with a secure way to store the key
 
-# Data models for request and response
-class PRDRequest(BaseModel):
-    prd_content: str  # PRD content in Markdown format
+# Define PRD reading tool
+def read_prd_tool(prd_content: str) -> str:
+    """Returns the full PRD content when asked about product requirements"""
+    return prd_content
 
-class Task(BaseModel):
-    title: str
-    description: Optional[str] = None
-    estimate: Optional[str] = None
-    priority: Optional[str] = None
-    category: Optional[str] = None
+# Simple HTML homepage
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PRD Task Generator</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; padding: 20px; }
+        textarea { width: 80%; height: 150px; margin-top: 10px; }
+        button { padding: 10px 20px; font-size: 16px; margin-top: 10px; }
+        #result { margin-top: 20px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>PRD Task Generator</h1>
+    <textarea id="prd_content" placeholder="Enter PRD content..."></textarea><br>
+    <button onclick="generateTasks()">Generate Tasks</button>
+    <p id="result"></p>
 
-class AnalysisStep(BaseModel):
-    thought: str  # What the agent is thinking
-    action: Optional[str] = None  # What action is being taken
-    observation: Optional[str] = None  # What was observed after the action
-
-class GenerationResponse(BaseModel):
-    tasks: List[Task]  # List of generated tasks
-    analysis: List[AnalysisStep]  # Steps taken during analysis
-    summary: Dict[str, str]  # Summary of the task generation process
-
-# Tool to read the PRD content
-class PRDTool:
-    def __init__(self, content: str):
-        self.content = content  # Store the PRD content
-
-    def read_prd(self) -> str:
-        """Returns the full PRD content."""
-        return self.content
-
-# ReAct Agent that uses the PRD tool to generate tasks
-class ReActAgent:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        openai.api_key = api_key  # Set the OpenAI API key
-        self.analysis_steps = []  # Store steps taken during analysis
-        self.tasks = []  # Store generated tasks
-
-    def add_analysis_step(self, thought: str, action: Optional[str] = None, observation: Optional[str] = None):
-        """Adds a step to the analysis log."""
-        self.analysis_steps.append(
-            AnalysisStep(thought=thought, action=action, observation=observation)
-        )
-
-    def generate_tasks(self, prd_content: str) -> GenerationResponse:
-        """Generates tasks based on the provided PRD content."""
-        prd_tool = PRDTool(prd_content)
-
-        # Step 1: Start the analysis process
-        self.add_analysis_step(
-            thought="Starting PRD analysis to understand the scope and requirements",
-            action="read_prd",
-            observation="PRD content loaded successfully",
-        )
-
-        # Step 2: Use GPT-3.5 to generate tasks
-        system_prompt = """You are a professional project manager and technical lead specialized in breaking down PRDs into actionable tasks. 
-        Analyze the PRD and generate a comprehensive list of tasks with the following information:
-        - Task title
-        - Description
-        - Time estimate
-        - Priority (High/Medium/Low)
-        - Category (Frontend/Backend/DevOps/Design/Testing)
-
-        Format your response as a JSON array of tasks. Each task should be detailed enough for developers to understand and implement."""
-
-        try:
-            # Call the OpenAI API to generate tasks
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Generate detailed tasks for this PRD:\n\n{prd_content}"},
-                ],
-                temperature=0.7,  # Controls creativity
-                max_tokens=2000,  # Limit the response length
-            )
-
-            # Parse the generated tasks
-            content = response.choices[0].message.content
-            try:
-                import json
-
-                tasks_data = json.loads(content)  # Parse the JSON response
-                self.tasks = [Task(**task) for task in tasks_data]  # Convert to Task objects
-            except json.JSONDecodeError:
-                # Fallback if the JSON is malformed
-                self.add_analysis_step(
-                    thought="Error parsing JSON response, attempting to extract tasks manually",
-                    action="parse_tasks",
-                    observation="Using fallback parsing method",
-                )
-                # Add a placeholder task for manual review
-                self.tasks = [
-                    Task(
-                        title="Review and fix task generation",
-                        description="Task generation needs manual review",
-                        priority="High",
-                    )
-                ]
-
-            # Step 3: Generate a summary of the tasks
-            summary = self.generate_summary()
-
-            return GenerationResponse(
-                tasks=self.tasks,
-                analysis=self.analysis_steps,
-                summary=summary,
-            )
-
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))  # Handle any errors
-
-    def generate_summary(self) -> Dict[str, str]:
-        """Generates a summary of the task generation process."""
-        total_tasks = len(self.tasks)
-        categories = {}  # Count tasks by category
-        priorities = {"High": 0, "Medium": 0, "Low": 0}  # Count tasks by priority
-
-        for task in self.tasks:
-            if task.category:
-                categories[task.category] = categories.get(task.category, 0) + 1
-            if task.priority:
-                priorities[task.priority] = priorities.get(task.priority, 0) + 1
-
-        return {
-            "total_tasks": str(total_tasks),
-            "categories": str(dict(categories)),
-            "priorities": str(dict(priorities)),
-            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    <script>
+        function generateTasks() {
+            const prdContent = document.getElementById("prd_content").value;
+            fetch('/generate/tasks', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prd_content: prdContent })
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById("result").innerText = "Tasks: " + data.tasks;
+            })
+            .catch(error => console.error('Error:', error));
         }
+    </script>
+</body>
+</html>
+"""
 
-# API Endpoint
-@app.post("/generate/tasks", response_model=GenerationResponse)
-async def generate_tasks(request: PRDRequest):
-    """Endpoint to generate tasks from a PRD."""
-    api_key = os.getenv("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")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="OpenAI API key not found")
+# Homepage route
+@app.route('/')
+def home():
+    return render_template_string(HTML_TEMPLATE)
 
-    # Instantiate the ReAct Agent with the PRD content
-    agent = ReActAgent(api_key)
-    return agent.generate_tasks(request.prd_content)
+@app.route('/generate/tasks', methods=['POST'])
+def generate_tasks():
+    # Check if the content type is text/plain
+    if request.content_type == 'text/plain':
+        prd_content = request.data.decode('utf-8')  # Read plain text input
+    else:
+        return jsonify({"error": "Invalid content type. Use 'text/plain'."}), 400
+    
+    # Create tool
+    prd_tool = FunctionTool.from_defaults(
+        fn=read_prd_tool,
+        name="read_prd",
+        description="Returns the full PRD content when asked about product requirements"
+    )
+    
+    # Create tool
+    prd_tool = FunctionTool.from_defaults(
+        fn=read_prd_tool,
+        name="read_prd",
+        description="Returns the full PRD content when asked about product requirements"
+    )
 
-# Run the app
-if __name__ == "__main__":
-    import uvicorn
+    # Initialize LLM
+    llm = OpenAI(model="gpt-4", temperature=0)
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Create OpenAIAgent
+    agent = ReActAgent.from_tools(
+        tools=[prd_tool],
+        llm=llm,
+        verbose=True
+    )
+
+
+    # Run agent
+    response = agent.chat("Generate tasks for the PRD")
+
+    return jsonify({"tasks": str(response)})
+
+if __name__ == '__main__':
+    app.run(port=5001, debug=True)
